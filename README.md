@@ -1,57 +1,45 @@
-# Starter — Circuit Breaker Proof Slice (PromptPilot)
+# Circuit Breaker Proof Slice (PromptPilot)
 
-This is the starter repository for **Option B (provided scenario)** of the assignment.
+PromptPilot drafts support replies by calling an external model provider. This slice adds one control: a circuit breaker that stops calling the provider during sustained failure, serves a safe fallback, and recovers through a probe.
 
-Repository: `https://github.com/kalviumcommunity/Production-Hardening-Proof-Slice-and-Review-Assignment` (public, owned by
-`kalviumcommunity`). Fork it, implement the breaker, and open a pull request back to your fork.
+## Risk addressed
 
-> The control here is a **circuit breaker**, covered earlier in this module. You are applying a
-> concept you have already learned, not a new one.
+When the provider is failing, every request still tries it, so doomed calls pile up and the failure spreads to the whole reply path.
 
-## Scenario
+## Chosen control
 
-PromptPilot drafts support replies by calling an external model provider. When the provider is slow
-or failing, every request still tries it, so doomed calls pile up and the failure spreads. You will
-add a **circuit breaker** so sustained failures short-circuit fast to a safe fallback, then recover
-through a probe.
+A circuit breaker in `src/circuitBreaker.js`, wrapping the provider call in `src/replyService.js`. It opens at a 50% failure rate over at least 5 calls, refuses calls for 30 seconds, then allows one probe. While it is open, the customer gets "Your ticket is queued for a human agent."
 
-## Your task
+## How to run / test
 
-Implement the circuit breaker in [`src/circuitBreaker.js`](./src/circuitBreaker.js). The file has a
-skeleton and a `TODO`. The behaviour is fully specified by the supplied tests.
-
-Prerequisite: Node.js 18 or newer (the tests use Node's built-in test runner). Then run:
+Needs Node.js 18 or newer, and nothing to install.
 
 ```bash
 node --test
 ```
 
-Make **all tests pass**. Do **not** modify the tests. The reply path in `src/replyService.js` is
-already wired to your breaker.
+Expected result: 16 tests pass and 0 fail (the 8 supplied tests, plus 8 in `test/hardening.test.js`).
 
-The breaker must:
+## Evidence
 
-- start `CLOSED` and count calls and failures;
-- move to `OPEN` when `failures / calls >= failureThreshold` **and** `calls >= minimumRequests`;
-- while `OPEN` and within `openMillis`, short-circuit (throw `CircuitOpenError` without calling the
-  dependency) and increment `metrics.short_circuited_total`;
-- after `openMillis` elapses (using the injected `now()`), allow one `HALF_OPEN` probe — success
-  closes it and resets counts, failure re-opens it;
-- increment `metrics.breaker_open_total` on every trip and call `onStateChange(state)` on every
-  transition.
+The test `the provider is not called while open, and it recovers through a probe` makes 105 requests during an outage. The provider is called only 5 times, the other 100 get the fallback with `short_circuited_total` at 100, and the next request after the window closes the breaker. The supplied tests prove the trip, short-circuit, probe, and re-open rules.
 
-## What to submit
+## Observability note
 
-Open a pull request on a branch named `production-hardening-slice`, and in your README include these
-labelled sections:
+`breaker_open_total` moves on every trip, and `short_circuited_total` on every refused call. Every state change logs one JSON line, with no ticket or provider error text:
 
-1. **Risk addressed**
-2. **Chosen control**
-3. **How to run / test**
-4. **Evidence** (a reviewer can confirm it works without reading all your code)
-5. **Observability note** (which metric moves and which state changes are logged)
-6. **Trade-off**
-7. **Remaining risk**
-8. **How this production control protects my Modules 1–3 design**
+```json
+{"event":"breaker_state_change","component":"model_provider","state":"OPEN","breaker_open_total":1,"short_circuited_total":0}
+```
 
-Submit the pull-request URL.
+## Trade-off
+
+During the open window, customers get the fallback even if the provider has already recovered, so they can wait up to 30 seconds longer for a model draft, and more tickets go to human agents.
+
+## Remaining risk
+
+The breaker only counts failures, so a provider that hangs without failing never trips it, and a hung probe would keep it in `HALF_OPEN`. Counts are not time-windowed, so a long healthy run delays a trip, and each process has its own breaker. Next, I would add a per-call timeout, then a rolling window.
+
+## How this production control protects my Modules 1-3 design
+
+It protects the Module 3 decision that the model only suggests and a fallback keeps the workflow alive when the model fails. It also protects the Module 1 promise that a support request always gets a timely answer, because a failing provider now gets a fast fallback instead of holding up the reply path.
