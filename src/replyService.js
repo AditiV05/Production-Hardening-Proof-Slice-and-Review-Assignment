@@ -10,7 +10,21 @@ const { createCircuitBreaker, CircuitOpenError } = require('./circuitBreaker');
 const FALLBACK_TEXT = 'Your ticket is queued for a human agent.';
 
 function createReplyService(callProvider, options = {}) {
-  const breaker = createCircuitBreaker(options);
+  const log = options.log ?? console.log;
+  const breaker = createCircuitBreaker({
+    ...options,
+    onStateChange(state) {
+      // Safe metadata only: never the ticket, the prompt, or the provider error text.
+      log(JSON.stringify({
+        event: 'breaker_state_change',
+        component: 'model_provider',
+        state,
+        breaker_open_total: breaker.metrics.breaker_open_total,
+        short_circuited_total: breaker.metrics.short_circuited_total,
+      }));
+      options.onStateChange?.(state);
+    },
+  });
 
   async function draftReply(ticket) {
     try {
